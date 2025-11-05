@@ -1,9 +1,12 @@
 settings:
-  myName: Andy Walters
-  myEmail: andywalters@gmail.com
+  myName: Gamepla
+  myEmail: gamepla@gmail.com
 
-  # if set to false, OpenAI is used
-  useLocalLLM: true
+  # LLM provider: 'ollama', 'local', or 'openai'
+  # if set to 'ollama', uses Ollama (requires Ollama to be installed and running)
+  # if set to 'local', uses LM Studio or compatible API
+  # if set to 'openai' or false, OpenAI is used
+  llmProvider: ollama
 
   # maximum number of characters to feed the AI of an email body. too many characters can start to confuse it
   maxEmailChars: 750
@@ -35,9 +38,32 @@ settings:
   # port number
   portNumber: 3003
 
+  # Process old emails feature
+  # if true, processes old emails (read/unread) and categorizes them
+  processOldEmails: true
+  # Age threshold in days for deleting emails (365 = 1 year)
+  # Emails older than this AND not worth reading will be deleted
+  deleteEmailsOlderThanDays: 365
+
 localLLM:
   # this is the default for any loaded model with LMStudio
   postURL: http://localhost:1234/v1/chat/completions
+
+ollama:
+  # Ollama API endpoint
+  baseURL: http://localhost:11434
+  # Model name to use
+  model: gpt-oss:20b
+  # Temperature for response generation
+  temperature: 0.7
+  # Timeout in milliseconds for API requests (6 minutes for large models)
+  timeout: 360000
+  # GPU Configuration Note:
+  # Ollama automatically uses GPU if available. To ensure GPU usage:
+  # - For NVIDIA: Install CUDA Toolkit and ensure drivers are up to date
+  # - Set environment variable: CUDA_VISIBLE_DEVICES=0 (Windows: set CUDA_VISIBLE_DEVICES=0)
+  # - Restart Ollama after setting environment variables
+  # - Verify with: ollama ps or check GPU usage in Task Manager (Windows) or nvidia-smi (Linux)
 
 openAI:
   # recommended gpt-3.5-turbo-0125 as cheap, fast, and relatively accurate
@@ -57,12 +83,13 @@ categoryFolderNames:
 # the simpler the rules, the better
 rules:
   keep: |
+    * USCIS documents, forms, notices, or any communication from USCIS (United States Citizenship and Immigration Services) - THESE ARE CRITICAL AND MUST BE KEPT AS RECORDS
     * security alert or one time password or login
     * personal message 
     * personal financial information
     * any message from someone on LinkedIn or Sales Navigator sent to me personally (reject blogs and newsletters)
     * someone contacting me to solicit my services or offer me a job
-    * a reply to a message Andy sent or likely sent
+    * a reply to a message I sent or likely sent
     * transactional email, receipt, or shipping notification
     * action required to ensure my products and services work properly
     * reminder about an upcoming event I already booked

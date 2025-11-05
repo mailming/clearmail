@@ -78,34 +78,64 @@ Follow these steps to get clearmail up and running on your system:
 
 ### Step 1: Gmail IMAP Access with App Password
 
-To securely access your Gmail account using IMAP in applications like clearmail, especially when you have 2-Step Verification enabled, you'll need to create and use an app password. An app password is a 16-character code that allows less secure apps to access your Google Account. Here's a detailed guide on how to create and use app passwords for Gmail IMAP access:
+To securely access your Gmail account using IMAP in applications like clearmail, you'll need to create and use an app password. Here's the most current way to do this:
 
-#### Prerequisites
-- **2-Step Verification:** To create an app password, your Google Account must have 2-Step Verification enabled. This adds an additional layer of security to your account by requiring a second verification step during sign-in.
+#### Quick Method (Direct Link)
 
-#### Creating an App Password
+1. **Go directly to App Passwords:**
+   - Visit: https://myaccount.google.com/apppasswords
+   - You'll be prompted to sign in if you're not already signed in.
 
-1. **Go to Your Google Account:**
-    - Navigate to [Google Account settings](https://myaccount.google.com/).
+2. **If you see "App passwords aren't available":**
+   - This means you need to enable 2-Step Verification first
+   - Go to: https://myaccount.google.com/security
+   - Click on "2-Step Verification" and follow the prompts to enable it
+   - Then return to the App Passwords page
 
-2. **Select Security:**
-    - Find the "Security" tab on the left-hand side and click on it to access your security settings.
+3. **Generate the App Password:**
+   - Select app: Choose **"Mail"**
+   - Select device: Choose **"Windows Computer"** (or "Other (Custom name)" and type "clearmail")
+   - Click **"Generate"**
+   - A 16-character password will appear (it looks like: `abcd efgh ijkl mnop`)
+   - **Copy this password immediately** - you won't be able to see it again!
 
-3. **Access 2-Step Verification Settings:**
-    - Under the "Signing in to Google" section, find and select "2-Step Verification." You may need to sign in to your account again for security purposes.
+4. **Add to your .env file:**
+   - Open the `.env` file in the clearmail directory
+   - Paste the password (you can remove spaces) in the `IMAP_PASSWORD` field
+   - Example: `IMAP_PASSWORD=abcdefghijklmnop`
 
-4. **Open App Passwords Page:**
-    - Scroll down to the bottom of the 2-Step Verification page, and you should see the "App passwords" option. Click on it to proceed.
-    - If you do not see this option, ensure that 2-Step Verification is indeed enabled and not set up exclusively for security keys. Note that app passwords may not be available for accounts managed by work, school, or other organizations, or for accounts with Advanced Protection enabled.
+#### Alternative: Step-by-Step Navigation
 
-5. **Generate a New App Password:**
-    - Click on "Select app" and choose "Mail" as the application you want to generate the password for.
-    - Choose the device you are generating the password for (e.g., Windows Computer, iPhone, or other).
-    - Click on "Generate" to create your new app password.
+If the direct link doesn't work, navigate manually:
 
-6. **Copy and Use the App Password:**
-    - A 16-character code will be displayed on your screen. This is your app password, and you'll use it instead of your regular password for setting up IMAP access in clearmail.
-    - Follow any on-screen instructions to enter the app password into clearmail's configuration. Typically, you'll replace your regular password with this app password in the `.env` file where IMAP credentials are specified.
+1. **Go to Google Account:**
+   - Visit https://myaccount.google.com/
+   - Sign in with your Gmail account
+
+2. **Go to Security:**
+   - Click on "Security" in the left sidebar (or go to https://myaccount.google.com/security)
+
+3. **Enable 2-Step Verification (if not already enabled):**
+   - Click on "2-Step Verification"
+   - Follow the prompts to set it up (you'll need your phone)
+
+4. **Access App Passwords:**
+   - After enabling 2-Step Verification, go back to Security
+   - Scroll down to find "App passwords" (it's under "How you sign in to Google")
+   - Or go directly to: https://myaccount.google.com/apppasswords
+
+5. **Create App Password:**
+   - Select app: **"Mail"**
+   - Select device: **"Windows Computer"** or **"Other (Custom name)"** → type "clearmail"
+   - Click **"Generate"**
+   - Copy the 16-character password shown
+
+#### Troubleshooting
+
+- **"App passwords aren't available"**: Enable 2-Step Verification first
+- **Can't find App passwords**: Make sure 2-Step Verification is fully set up (not just security keys)
+- **Work/School account**: App passwords may not be available for managed accounts - contact your administrator
+- **Advanced Protection**: If you have Advanced Protection enabled, app passwords won't work - you'll need to use OAuth instead (not currently supported by clearmail)
 
 ### Step 2: Configure the YAML File
 
@@ -218,6 +248,38 @@ To stop the clearmail process type `<ctrl> + c` on Mac.
 ## Large Language Model (LLM) Choice: Local or OpenAI
 
 Clearmail supports integration with any running local LLM and is configured out of the box to support default LM Studio settings. The advantage of Local LLMs is privacy and zero inference costs, but the tradeoff is likely performance.  For that reason, clearmail also supports using any OpenAI chat completion model.
+
+### Using Ollama
+
+To use Ollama with clearmail:
+
+1. Install Ollama from [https://ollama.ai](https://ollama.ai)
+2. **Ensure GPU Support (IMPORTANT):**
+   - **For NVIDIA GPUs on Windows:**
+     - Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) (version 11.8 or later recommended)
+     - Ollama should automatically detect and use your GPU once CUDA is installed
+     - Verify GPU usage by running: `ollama ps` after starting a model
+   - **For AMD GPUs:**
+     - Install [ROCm](https://rocm.docs.amd.com/) drivers
+     - Ollama will automatically use GPU if ROCm is properly configured
+   - **To force GPU usage (if CPU is still being used):**
+     - Set environment variable before starting Ollama: `set CUDA_VISIBLE_DEVICES=0` (Windows) or `export CUDA_VISIBLE_DEVICES=0` (Linux/Mac)
+     - Restart Ollama service after setting the environment variable
+     - On Windows, you can also set this in System Environment Variables permanently
+3. Pull the model: `ollama pull gpt-oss:20b`
+4. Configure `config.yml`:
+   ```yaml
+   settings:
+     llmProvider: ollama
+   
+   ollama:
+     baseURL: http://localhost:11434
+     model: gpt-oss:20b
+   ```
+5. **Verify GPU Usage:**
+   - Start Ollama and run a model
+   - Check Task Manager (Windows) or `nvidia-smi` (Linux) to confirm GPU utilization
+   - If GPU is not being used, ensure CUDA drivers are up to date and Ollama is restarted
 
 ### Local Option: Setting Up LM Studio
 

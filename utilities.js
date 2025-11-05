@@ -77,10 +77,71 @@ async function saveLastTimestamp(timestamp, timestampFilePath) {
     await fs.writeFile(timestampFilePath, timestamp, 'utf8');
 }
 
+/**
+ * Checks if an email is from eBay, Craigslist, or other media involving computer queries with "gamepla"
+ * These emails should be automatically moved to Records folder as they are business-related
+ * @param {string} emailSender - The sender email address or name
+ * @param {string} emailSubject - The email subject
+ * @param {string} emailBody - The email body (text or HTML)
+ * @returns {boolean} - True if email should be moved to Records
+ */
+function isBusinessEmail(emailSender, emailSubject, emailBody) {
+    const senderLower = (emailSender || '').toLowerCase();
+    const subjectLower = (emailSubject || '').toLowerCase();
+    const bodyLower = (emailBody || '').toLowerCase();
+    
+    // Check if sender is from eBay, Craigslist, or other marketplace platforms
+    const marketplacePatterns = [
+        'ebay',
+        'craigslist',
+        'marketplace',
+        'offerup',
+        'facebook marketplace',
+        'letgo',
+        'mercari',
+        'poshmark'
+    ];
+    
+    const isFromMarketplace = marketplacePatterns.some(pattern => 
+        senderLower.includes(pattern) || subjectLower.includes(pattern)
+    );
+    
+    if (!isFromMarketplace) {
+        return false;
+    }
+    
+    // Check if email involves computer queries with "gamepla" or computer-related terms
+    const computerTerms = [
+        'gamepla',
+        'computer',
+        'pc',
+        'thinkpad',
+        'laptop',
+        'desktop',
+        'cpu',
+        'gpu',
+        'ram',
+        'hardware',
+        'system',
+        'htpc',
+        'intel',
+        'amd',
+        'nvidia'
+    ];
+    
+    const combinedText = `${subjectLower} ${bodyLower}`;
+    const hasComputerQuery = computerTerms.some(term => 
+        combinedText.includes(term.toLowerCase())
+    );
+    
+    return hasComputerQuery;
+}
+
 
 module.exports = {
     executeOpenAIWithRetry,
     fixJSON,
     getLastTimestamp,
-    saveLastTimestamp
+    saveLastTimestamp,
+    isBusinessEmail
 };

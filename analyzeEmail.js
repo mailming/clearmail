@@ -23,6 +23,8 @@ async function analyzeEmail(emailSubject, emailSender, emailBody, emailDate) {
 
         "meets_criteria": false IF email is
         ${config.rules.reject}
+        
+        IMPORTANT: USCIS (United States Citizenship and Immigration Services) documents, forms, notices, or any communication from USCIS are CRITICAL LEGAL DOCUMENTS and MUST ALWAYS be marked as "meets_criteria": true. These emails are extremely important records and must be kept regardless of any other factors.
         </rules>
         
         <email>
@@ -40,7 +42,9 @@ async function analyzeEmail(emailSubject, emailSender, emailBody, emailDate) {
     try {
         let result;
 
-        if (!config.settings.useLocalLLM) {
+        const llmProvider = config.settings.llmProvider || (config.settings.useLocalLLM ? 'local' : 'openai');
+        
+        if (llmProvider === 'openai') {
             // Use OpenAI
             const openAIParams = {
                 model: config.openAI.model,
@@ -48,7 +52,7 @@ async function analyzeEmail(emailSubject, emailSender, emailBody, emailDate) {
                 // response_format: {"type": "json_object"},
                 messages: [{
                     'role': 'system',
-                    'content': `We are an AI built to test whether an email meets criteria for user ${config.settings.myName}.`,
+                    'content': `We are an AI built to test whether an email meets criteria for user ${config.settings.myName}. CRITICAL: USCIS documents and communications are ALWAYS important and must be kept as records.`,
                 }, {
                     'role': 'user',
                     'content': emailPrompt
@@ -56,8 +60,38 @@ async function analyzeEmail(emailSubject, emailSender, emailBody, emailDate) {
             };
             result = fixJSON(await executeOpenAIWithRetry(openAIParams));
 
+        } else if (llmProvider === 'ollama') {
+            // Use Ollama
+            const ollamaParams = {
+                model: config.ollama.model,
+                messages: [
+                    {
+                        role: "system",
+                        content: `We are an AI built to test whether an email meets criteria for user ${config.settings.myName}. CRITICAL: USCIS documents and communications are ALWAYS important and must be kept as records.`
+                    },
+                    {
+                        role: "user",
+                        content: emailPrompt
+                    }
+                ],
+                options: {
+                    temperature: config.ollama.temperature || 0.7,
+                },
+                stream: false
+            };
+            
+            const ollamaURL = `${config.ollama.baseURL}/api/chat`;
+            const response = await axios.post(ollamaURL, ollamaParams, {
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: config.ollama.timeout || 60000
+            });
+            
+            result = fixJSON(response.data.message.content.trim());
+            
         } else {
-            // Use local LLM
+            // Use local LLM (LM Studio or compatible)
             const localParams = {
                 "messages": [
                     {
@@ -108,7 +142,7 @@ async function analyzeEmail(emailSubject, emailSender, emailBody, emailDate) {
     } catch (error) {
         console.error('Error determining if email is worth reading:', error);
 
-        // Default to false in case of error
+        // Default to unknown in case of error
         analysis.judgment = 'unknown';
     }
 

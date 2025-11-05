@@ -1,11 +1,9 @@
 const Imap = require("imap");
-const pem = require('pem');
 const fs = require('fs');
-const path = require('path');
 const config = require("./config");
 const {simpleParser} = require("mailparser");
 const {analyzeEmail} = require("./analyzeEmail");
-const {saveLastTimestamp} = require("./utilities");
+const {saveLastTimestamp, isBusinessEmail} = require("./utilities");
 
 async function processEmails(timestamp) {
     return new Promise(async (resolve, reject) => {
@@ -13,44 +11,16 @@ async function processEmails(timestamp) {
         console.log(`\n\n[${new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${new Date(timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}]`);
         console.log(`*** Checking for unread, non-starred messages.`);
 
-        const certsDir = path.join(__dirname, 'certs');
-        const certPath = path.join(certsDir, 'imap-cert.pem');
-        const keyPath = path.join(certsDir, 'imap-key.pem');
-
-        // Ensure the certs directory exists
-        if (!fs.existsSync(certsDir)) {
-            fs.mkdirSync(certsDir, { recursive: true });
-        }
-
-        // Check if the certificate and key already exist, generate if not
-        if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-            console.log('Generating new self-signed certificate...');
-            const keys = await new Promise((resolve, reject) => {
-                pem.createCertificate({ days: 365, selfSigned: true }, (err, keys) => {
-                    if (err) {
-                        return reject(err);
-                    }
-                    fs.writeFileSync(certPath, keys.certificate);
-                    fs.writeFileSync(keyPath, keys.serviceKey);
-                    resolve(keys);
-                });
-            });
-        }
-
-        const cert = fs.readFileSync(certPath);
-        const key = fs.readFileSync(keyPath);
-
         // Initialize IMAP with TLS configuration
+        // Gmail IMAP uses standard TLS, no custom certificates needed
         const imapConfig = {
             user: process.env.IMAP_USER,
             password: process.env.IMAP_PASSWORD,
-            host: 'imap.gmail.com',
-            port: 993,
+            host: process.env.IMAP_HOST || 'imap.gmail.com',
+            port: parseInt(process.env.IMAP_PORT) || 993,
             tls: true,
             tlsOptions: {
-                key: key,
-                cert: cert,
-                rejectUnauthorized: false // For development use only; be cautious with this in production
+                rejectUnauthorized: false // Allow connection (Gmail uses valid certs, but some Windows setups have CA issues)
             }
         };
 
@@ -96,14 +66,49 @@ async function processEmails(timestamp) {
                                             if (!attributes.flags.includes('\\Flagged')) {
 
                                                 const emailBody = (email?.text) ? email.text : email.html;
+                                                
+                                                // Check if this is a business email (eBay/Craigslist/computer queries with gamepla)
+                                                // If so, automatically move to Records without AI analysis
+                                                if (isBusinessEmail(email.from.text, email.subject, emailBody)) {
+                                                    const recordsFolder = 'Records';
+                                                    console.log(`*** BUSINESS EMAIL DETECTED: ${email.subject} - Auto-moving to Records`);
+                                                    if (config.settings.starAllKeptEmails) {
+                                                        imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
+                                                            if (err) console.log('Error starring email:', err);
+                                                        });
+                                                    }
+                                                    // Move email to Records folder
+                                                    imap.move(attributes.uid, recordsFolder, function (err) {
+                                                        if (err) {
+                                                            console.log(`Error moving email to ${recordsFolder}:`, err);
+                                                        } else {
+                                                            console.log(`Email moved to ${recordsFolder} (business email).`);
+                                                        }
+                                                    });
+                                                    i++;
+                                                    resolve();
+                                                    return;
+                                                }
+                                                
                                                 const emailAnalysis = await analyzeEmail(email.subject, email.from.text, emailBody.substring(0, config.settings.maxEmailChars), email.date);
 
                                                 if (emailAnalysis.judgment !== 'unknown') {
                                                     // After determining if an email is worth reading or not
                                                     if (emailAnalysis.judgment === true) {
-                                                        // Flag the message as important
-                                                        if (config.settings.starAllKeptEmails) imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
-                                                            if (err) console.log('Error starring email:', err);
+                                                        // Move to Records category (worth reading emails)
+                                                        const recordsFolder = 'Records';
+                                                        if (config.settings.starAllKeptEmails) {
+                                                            imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
+                                                                if (err) console.log('Error starring email:', err);
+                                                            });
+                                                        }
+                                                        // Move email to Records folder
+                                                        imap.move(attributes.uid, recordsFolder, function (err) {
+                                                            if (err) {
+                                                                console.log(`Error moving email to ${recordsFolder}:`, err);
+                                                            } else {
+                                                                console.log(`Email moved to ${recordsFolder} (worth reading).`);
+                                                            }
                                                         });
                                                     } else if (emailAnalysis.judgment === false) {
                                                         // Mark the message as seen and remove the primary inbox label
@@ -149,17 +154,18 @@ async function processEmails(timestamp) {
                                 saveLastTimestamp(new Date().toISOString(), config.settings.timestampFilePath);
                                 imap.end(); // Close the IMAP connection only after all emails have been processed
 
-                                resolve({statusCode: 200, message: 'Email processing completed.'});
+                                resolve({statusCode: 200, message: 'Email processing completed.', processedCount: i});
                             }).catch(error => {
                                 console.error('Error processing some emails:', error);
                                 imap.end(); // Consider closing the IMAP connection even if there are errors
 
-                                resolve({statusCode: 500, message: 'Error processing email.'});
+                                resolve({statusCode: 500, message: 'Error processing email.', processedCount: 0});
                             });
                         });
                     } else {
                         console.log('No new messages to fetch.');
                         imap.end();
+                        resolve({statusCode: 200, message: 'No new messages to fetch.', processedCount: 0});
                     }
                 });
             });
