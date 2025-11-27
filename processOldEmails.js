@@ -5,15 +5,23 @@ const {simpleParser} = require("mailparser");
 const {analyzeEmail} = require("./analyzeEmail");
 const {isBusinessEmail} = require("./utilities");
 
-async function processOldEmails() {
+async function processOldEmails(retryCount = 0) {
+    const maxRetries = 3;
+    const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 10000); // Exponential backoff, max 10 seconds
+    const PROCESSING_TIMEOUT = 30 * 60 * 1000; // 30 minutes timeout to prevent hanging
+
     return new Promise(async (resolve, reject) => {
         // Process ALL emails (no date limit)
+        let imapRef = null; // Will hold reference to imap for timeout handler
         const deleteThresholdDate = new Date();
         deleteThresholdDate.setDate(deleteThresholdDate.getDate() - (config.settings.deleteEmailsOlderThanDays || 365));
 
         console.log(`\n\n[${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}]`);
         console.log(`*** Processing ALL old emails (no date limit).`);
         console.log(`*** Will delete emails older than ${config.settings.deleteEmailsOlderThanDays} days that are NOT worth reading.`);
+        if (retryCount > 0) {
+            console.log(`*** Retry attempt ${retryCount}/${maxRetries}`);
+        }
 
         // Initialize IMAP with TLS configuration
         const imapConfig = {
@@ -24,29 +32,68 @@ async function processOldEmails() {
             tls: true,
             tlsOptions: {
                 rejectUnauthorized: false
-            }
+            },
+            connTimeout: 60000, // 60 seconds connection timeout
+            authTimeout: 60000  // 60 seconds authentication timeout
         };
 
         const imap = new Imap(imapConfig);
+        imapRef = imap; // Store reference for timeout handler
+        
+        // Set a timeout to ensure the promise always resolves, even if processing gets stuck
+        const timeoutId = setTimeout(() => {
+            console.error('*** WARNING: Old email processing timed out after 30 minutes. Forcing completion...');
+            try {
+                if (imapRef && imapRef.state !== 'closed') {
+                    imapRef.end();
+                }
+            } catch (err) {
+                console.error('Error closing IMAP connection on timeout:', err);
+            }
+            // Use original resolve to avoid clearing timeout (already timed out)
+            resolve({statusCode: 200, message: 'Old email processing timed out.', processed: 0, categorized: 0, deleted: 0});
+        }, PROCESSING_TIMEOUT);
+        
+        // Wrap resolve/reject to clear timeout
+        const originalResolve = resolve;
+        const originalReject = reject;
+        resolve = (...args) => {
+            clearTimeout(timeoutId);
+            originalResolve(...args);
+        };
+        reject = (...args) => {
+            clearTimeout(timeoutId);
+            originalReject(...args);
+        };
 
         function searchAndProcessEmails(mailboxName, searchCriteria, callback) {
-            // Open in read-write mode (true) to allow deletions
-            imap.openBox(mailboxName, true, function(err, box) {
-                if (err) {
-                    console.log(`Could not open ${mailboxName}, skipping...`);
-                    callback(null, []);
-                    return;
-                }
-
-                imap.search(searchCriteria, function(err, results) {
+            try {
+                // Open in read-write mode (true) to allow deletions
+                imap.openBox(mailboxName, true, function(err, box) {
                     if (err) {
-                        console.log(`Error searching ${mailboxName}:`, err);
+                        console.log(`Could not open ${mailboxName}, skipping...`);
                         callback(null, []);
                         return;
                     }
-                    callback(results, mailboxName);
+
+                    try {
+                        imap.search(searchCriteria, function(err, results) {
+                            if (err) {
+                                console.log(`Error searching ${mailboxName}:`, err);
+                                callback(null, []);
+                                return;
+                            }
+                            callback(results, mailboxName);
+                        });
+                    } catch (searchErr) {
+                        console.error(`Exception during search in ${mailboxName}:`, searchErr);
+                        callback(null, []);
+                    }
                 });
-            });
+            } catch (openErr) {
+                console.error(`Exception opening ${mailboxName}:`, openErr);
+                callback(null, []);
+            }
         }
 
         imap.once('ready', async function () {
@@ -54,6 +101,8 @@ async function processOldEmails() {
             
             // Try to search in "[Gmail]/All Mail" first (contains all emails)
                 // If that doesn't work, search INBOX and category folders
+                // Note: All Mail includes emails from all folders including Records.
+                // We exclude Records folder from direct searches to avoid processing emails already in Records.
                 const allMailFolders = ['[Gmail]/All Mail', '[Google Mail]/All Mail', 'INBOX'];
                 
                 let searchResults = [];
@@ -73,7 +122,8 @@ async function processOldEmails() {
                     const folderName = allMailFolders[currentFolderIndex];
                     console.log(`Searching in ${folderName}...`);
                     
-                    // Search ALL emails (no date restriction)
+                    // Search ALL emails (no date restriction), but exclude Records folder
+                    // Note: Gmail IMAP search might not support label exclusion in search, so we'll check labels during processing
                     searchAndProcessEmails(folderName, ['ALL'], function(results, mailboxName) {
                     if (results && results.length > 0) {
                         console.log(`Found ${results.length} emails in ${mailboxName}`);
@@ -89,7 +139,9 @@ async function processOldEmails() {
 
             function searchCategoryFolders() {
                 console.log('Searching category folders...');
-                const categoryFolders = config.categoryFolderNames || [];
+                const categoryFolders = (config.categoryFolderNames || []).filter(folder => 
+                    folder !== 'Records' // Exclude Records folder from category search
+                );
                 let folderIndex = 0;
                 
                 function tryNextCategoryFolder() {
@@ -129,6 +181,14 @@ async function processOldEmails() {
                     return;
                 }
 
+                // Skip processing if mailbox is Records - emails already in Records don't need processing
+                if (mailboxName === 'Records' || mailboxName === '[Gmail]/Records' || mailboxName === '[Google Mail]/Records') {
+                    console.log(`Skipping ${mailboxName} - emails already in Records folder don't need processing.`);
+                    imap.end();
+                    resolve({statusCode: 200, message: 'Skipped Records folder.', processed: 0, categorized: 0, deleted: 0});
+                    return;
+                }
+
                 console.log(`Processing ${results.length} emails from ${mailboxName}...`);
                 
                 // Re-open mailbox in read-write mode (true) to allow deletions
@@ -164,6 +224,25 @@ async function processOldEmails() {
                     processedCount++;
 
                     try {
+                        // Skip if email is already in Records folder (check mailbox name)
+                        if (mailboxName === 'Records' || mailboxName === '[Gmail]/Records' || mailboxName === '[Google Mail]/Records') {
+                            // Skip this email and process next
+                            processEmailSequentially();
+                            return;
+                        }
+
+                        // Note: When searching in All Mail, it includes emails from all folders including Records.
+                        // We can't easily check if an email is in Records without expensive operations,
+                        // but we've excluded Records folder from direct searches, so most Records emails won't be processed.
+                        fetchAndProcessEmail(uid);
+                    } catch (err) {
+                        console.error('Error in processEmailSequentially:', err);
+                        processEmailSequentially(); // Continue with next email
+                    }
+                }
+
+                function fetchAndProcessEmail(uid) {
+                    try {
                         // Fetch single email
                         const f = imap.fetch(uid, {
                             bodies: '',
@@ -178,6 +257,23 @@ async function processOldEmails() {
                                 try {
                                     const email = await simpleParser(stream);
                                     const attributes = await attributesPromise;
+                                    
+                                    // Check if email is already in Records folder using Gmail labels
+                                    // Gmail IMAP provides X-GM-LABELS extension
+                                    const gmailLabels = attributes['x-gm-labels'] || attributes['X-GM-LABELS'] || [];
+                                    const labelsArray = Array.isArray(gmailLabels) ? gmailLabels : (gmailLabels ? [gmailLabels] : []);
+                                    const isInRecords = labelsArray.some(label => {
+                                        const labelStr = String(label).toLowerCase();
+                                        return labelStr === 'records';
+                                    });
+                                    
+                                    if (isInRecords) {
+                                        console.log(`*** Skipping email already in Records: ${email.subject || '(no subject)'}`);
+                                        // Process next email - ensure we continue the loop
+                                        setImmediate(() => processEmailSequentially());
+                                        return;
+                                    }
+                                    
                                     const emailDate = email.date || new Date(attributes.date);
                                     const emailAge = Math.floor((new Date() - emailDate) / (1000 * 60 * 60 * 24)); // Age in days
 
@@ -204,8 +300,8 @@ async function processOldEmails() {
                                                 });
                                             });
                                             
-                                            // Process next email
-                                            processEmailSequentially();
+                                            // Process next email - ensure we continue the loop
+                                            setImmediate(() => processEmailSequentially());
                                             return;
                                         }
                                         
@@ -313,37 +409,59 @@ async function processOldEmails() {
                                     }
                                 } catch (err) {
                                     console.error('Error processing email:', err);
+                                    // Ensure we continue even on error
                                 }
                                 
-                                // Process next email
-                                processEmailSequentially();
+                                // Process next email - ensure we continue the loop
+                                setImmediate(() => processEmailSequentially());
                             });
                         });
 
                         f.once('error', function(err) {
                             console.error('Error fetching email:', err);
-                            processEmailSequentially(); // Continue with next email
+                            // Continue with next email - ensure we continue the loop
+                            setImmediate(() => processEmailSequentially());
                         });
 
                     } catch (err) {
                         console.error('Error in processEmailSequentially:', err);
-                        processEmailSequentially(); // Continue with next email
+                        // Continue with next email - ensure we continue the loop
+                        setImmediate(() => processEmailSequentially());
                     }
                 }
 
                 function finishProcessing() {
-                    // Expunge deleted emails
-                    imap.expunge(function (err) {
-                        if (err) {
-                            console.log('Error expunging deleted emails:', err);
+                    try {
+                        // Expunge deleted emails
+                        imap.expunge(function (err) {
+                            if (err) {
+                                console.log('Error expunging deleted emails:', err);
+                            }
+                            console.log(`\n*** Finished processing old emails:`);
+                            console.log(`  - Processed: ${processedCount} emails`);
+                            console.log(`  - Categorized: ${categorizedCount} emails`);
+                            console.log(`  - Deleted: ${deletedCount} emails`);
+                            
+                            // Close IMAP connection and resolve promise
+                            try {
+                                imap.end();
+                            } catch (endErr) {
+                                console.error('Error closing IMAP connection:', endErr);
+                            }
+                            
+                            console.log('*** Old email processing completed. Returning to new email check...');
+                            resolve({statusCode: 200, message: 'Old email processing completed.', processed: processedCount, categorized: categorizedCount, deleted: deletedCount});
+                        });
+                    } catch (err) {
+                        console.error('Error in finishProcessing:', err);
+                        // Ensure we still resolve the promise even on error
+                        try {
+                            imap.end();
+                        } catch (endErr) {
+                            console.error('Error closing IMAP connection:', endErr);
                         }
-                        console.log(`\n*** Finished processing old emails:`);
-                        console.log(`  - Processed: ${processedCount} emails`);
-                        console.log(`  - Categorized: ${categorizedCount} emails`);
-                        console.log(`  - Deleted: ${deletedCount} emails`);
-                        imap.end();
-                        resolve({statusCode: 200, message: 'Old email processing completed.', processed: processedCount, categorized: categorizedCount, deleted: deletedCount});
-                    });
+                        resolve({statusCode: 200, message: 'Old email processing completed with errors.', processed: processedCount, categorized: categorizedCount, deleted: deletedCount});
+                    }
                 }
 
                 // Start processing emails one at a time
@@ -356,8 +474,22 @@ async function processOldEmails() {
         });
 
         imap.once('error', function(err) {
-            console.error('IMAP connection error:', err);
-            reject(err);
+            console.error('IMAP connection error:', err.message);
+            
+            // Check if it's a timeout error and we haven't exceeded max retries
+            if ((err.source === 'timeout-auth' || err.source === 'timeout') && retryCount < maxRetries) {
+                console.log(`Connection timeout. Retrying in ${retryDelay/1000} seconds...`);
+                imap.end();
+                
+                setTimeout(() => {
+                    processOldEmails(retryCount + 1)
+                        .then(resolve)
+                        .catch(reject);
+                }, retryDelay);
+            } else {
+                imap.end();
+                reject(err);
+            }
         });
 
         imap.connect();

@@ -5,11 +5,17 @@ const {simpleParser} = require("mailparser");
 const {analyzeEmail} = require("./analyzeEmail");
 const {saveLastTimestamp, isBusinessEmail} = require("./utilities");
 
-async function processEmails(timestamp) {
+async function processEmails(timestamp, retryCount = 0) {
+    const maxRetries = 3;
+    const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 10000); // Exponential backoff, max 10 seconds
+
     return new Promise(async (resolve, reject) => {
 
         console.log(`\n\n[${new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ${new Date(timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}]`);
         console.log(`*** Checking for unread, non-starred messages.`);
+        if (retryCount > 0) {
+            console.log(`*** Retry attempt ${retryCount}/${maxRetries}`);
+        }
 
         // Initialize IMAP with TLS configuration
         // Gmail IMAP uses standard TLS, no custom certificates needed
@@ -21,7 +27,9 @@ async function processEmails(timestamp) {
             tls: true,
             tlsOptions: {
                 rejectUnauthorized: false // Allow connection (Gmail uses valid certs, but some Windows setups have CA issues)
-            }
+            },
+            connTimeout: 60000, // 60 seconds connection timeout
+            authTimeout: 60000  // 60 seconds authentication timeout
         };
 
         const imap = new Imap(imapConfig);
@@ -33,11 +41,21 @@ async function processEmails(timestamp) {
         imap.once('ready', async function () {
 
             openInbox(async function (err, box) {
-                if (err) throw err;
+                if (err) {
+                    console.error('Error opening inbox:', err);
+                    imap.end();
+                    reject(err);
+                    return;
+                }
 
                 // Use search criteria to get unread emails since the last timestamp
                 imap.search(['UNSEEN', ['SINCE', new Date(timestamp)]], async function (err, results) {
-                    if (err) throw err;
+                    if (err) {
+                        console.error('Error searching emails:', err);
+                        imap.end();
+                        reject(err);
+                        return;
+                    }
 
                     if (results.length > 0) {
                         const fetchOptions = {
@@ -61,6 +79,21 @@ async function processEmails(timestamp) {
                                     simpleParser(stream)
                                         .then(async email => {
                                             const attributes = await attributesPromise;
+
+                                            // Check if email is already in Records folder using Gmail labels
+                                            // Gmail IMAP provides X-GM-LABELS extension
+                                            const gmailLabels = attributes['x-gm-labels'] || attributes['X-GM-LABELS'] || [];
+                                            const labelsArray = Array.isArray(gmailLabels) ? gmailLabels : (gmailLabels ? [gmailLabels] : []);
+                                            const isInRecords = labelsArray.some(label => {
+                                                const labelStr = String(label).toLowerCase();
+                                                return labelStr === 'records';
+                                            });
+                                            
+                                            if (isInRecords) {
+                                                console.log(`*** Skipping email already in Records: ${email.subject || '(no subject)'}`);
+                                                resolve();
+                                                return;
+                                            }
 
                                             // Check if the email is flagged as \\Starred; if so, do not process further
                                             if (!attributes.flags.includes('\\Flagged')) {
@@ -169,6 +202,25 @@ async function processEmails(timestamp) {
                     }
                 });
             });
+        });
+
+        imap.once('error', function(err) {
+            console.error('IMAP connection error:', err.message);
+            
+            // Check if it's a timeout error and we haven't exceeded max retries
+            if ((err.source === 'timeout-auth' || err.source === 'timeout') && retryCount < maxRetries) {
+                console.log(`Connection timeout. Retrying in ${retryDelay/1000} seconds...`);
+                imap.end();
+                
+                setTimeout(() => {
+                    processEmails(timestamp, retryCount + 1)
+                        .then(resolve)
+                        .catch(reject);
+                }, retryDelay);
+            } else {
+                imap.end();
+                reject(err);
+            }
         });
 
         imap.connect();

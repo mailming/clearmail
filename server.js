@@ -93,6 +93,7 @@ async function main() {
                 }
             } catch (error) {
                 console.error('Failed to process emails:', error);
+                console.error('Error stack:', error.stack);
                 // On error, still check for new emails after interval
                 setTimeout(runProcessNewEmails, refreshIntervalMilliseconds);
             } finally {
@@ -129,6 +130,7 @@ async function main() {
                 setTimeout(runProcessNewEmails, 1000);
             } catch (error) {
                 console.error('Failed to process old emails:', error);
+                console.error('Error stack:', error.stack);
                 // On error, return to checking new emails
                 setTimeout(runProcessNewEmails, refreshIntervalMilliseconds);
             } finally {
@@ -142,4 +144,28 @@ async function main() {
     }
 }
 
-main();
+// Add global error handlers to prevent unexpected stops
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('Stack:', reason?.stack);
+    // Don't exit, just log the error and continue
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    console.error('Stack:', error.stack);
+    // Don't exit, just log the error and continue
+    // The process will continue running
+});
+
+main().catch(error => {
+    console.error('Fatal error in main:', error);
+    console.error('Stack:', error.stack);
+    // Restart the main function after a delay
+    setTimeout(() => {
+        console.log('Restarting main function...');
+        main().catch(err => {
+            console.error('Failed to restart:', err);
+        });
+    }, 5000);
+});
