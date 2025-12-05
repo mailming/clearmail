@@ -97,45 +97,39 @@ async function processOldEmails(retryCount = 0) {
         }
 
         imap.once('ready', async function () {
-            console.log(`Searching for ALL emails...`);
+            console.log(`Searching for unprocessed emails in INBOX...`);
             
-            // Try to search in "[Gmail]/All Mail" first (contains all emails)
-                // If that doesn't work, search INBOX and category folders
-                // Note: All Mail includes emails from all folders including Records.
-                // We exclude Records folder from direct searches to avoid processing emails already in Records.
-                const allMailFolders = ['[Gmail]/All Mail', '[Google Mail]/All Mail', 'INBOX'];
-                
-                let searchResults = [];
-                let currentFolderIndex = 0;
-
-                function tryNextFolder() {
-                    if (currentFolderIndex >= allMailFolders.length) {
-                        // If no results from main folders, try category folders
-                        if (searchResults.length === 0 && config.settings.sortIntoCategoryFolders) {
-                            searchCategoryFolders();
-                        } else {
-                            processSearchResults(searchResults);
-                        }
-                        return;
-                    }
-
-                    const folderName = allMailFolders[currentFolderIndex];
-                    console.log(`Searching in ${folderName}...`);
-                    
-                    // Search ALL emails (no date restriction), but exclude Records folder
-                    // Note: Gmail IMAP search might not support label exclusion in search, so we'll check labels during processing
-                    searchAndProcessEmails(folderName, ['ALL'], function(results, mailboxName) {
-                    if (results && results.length > 0) {
-                        console.log(`Found ${results.length} emails in ${mailboxName}`);
-                        searchResults = results;
-                        // Process results from first folder that has emails
-                        processSearchResults(searchResults, mailboxName);
+            // IMPORTANT: Search INBOX first, NOT All Mail, because All Mail includes Records folder emails
+            // We want to process emails that haven't been processed yet (not starred, not in Records)
+            // Priority: INBOX emails that haven't been processed > category folder emails
+            // Never search in All Mail or Records folder
+            
+            let searchResults = [];
+            
+            // First, search INBOX for unprocessed emails (not starred, not in Records)
+            console.log(`Searching INBOX for unprocessed emails (excluding starred and Records)...`);
+            
+            // Search criteria: ALL emails in INBOX (we'll filter out starred emails during processing)
+            // The IMAP library doesn't support ['NOT', 'FLAGGED'], so we search all and filter during processing
+            // We'll check Records label and flagged status during processing to skip those emails
+            searchAndProcessEmails('INBOX', ['ALL'], function(results, mailboxName) {
+                if (results && results.length > 0) {
+                    console.log(`Found ${results.length} unprocessed emails in INBOX`);
+                    searchResults = results;
+                    // Process INBOX emails first
+                    processSearchResults(searchResults, mailboxName);
+                } else {
+                    console.log(`No unprocessed emails in INBOX. Checking category folders...`);
+                    // If no emails in INBOX, try category folders (excluding Records)
+                    if (config.settings.sortIntoCategoryFolders) {
+                        searchCategoryFolders();
                     } else {
-                        currentFolderIndex++;
-                        tryNextFolder();
+                        console.log('No emails found to process.');
+                        imap.end();
+                        resolve({statusCode: 200, message: 'No old emails to process.', processed: 0, categorized: 0, deleted: 0});
                     }
-                });
-            }
+                }
+            });
 
             function searchCategoryFolders() {
                 console.log('Searching category folders...');
@@ -189,7 +183,11 @@ async function processOldEmails(retryCount = 0) {
                     return;
                 }
 
-                console.log(`Processing ${results.length} emails from ${mailboxName}...`);
+                // Reverse the results array to process newest emails first (IMAP returns UIDs in ascending order)
+                // Higher UIDs = newer emails, so reversing gives us newest-to-oldest order
+                results = results.reverse();
+                
+                console.log(`Processing ${results.length} emails from ${mailboxName} (newest to oldest)...`);
                 
                 // Re-open mailbox in read-write mode (true) to allow deletions
                 imap.openBox(mailboxName, true, function(err, box) {
@@ -199,6 +197,10 @@ async function processOldEmails(retryCount = 0) {
                         resolve({statusCode: 500, message: 'Error opening mailbox for deletion.'});
                         return;
                     }
+
+                    // Check if mailbox is read-only (category folders are often read-only)
+                    const isReadOnly = box.readOnly || false;
+                    const canStarEmails = !isReadOnly && mailboxName === 'INBOX';
 
                     const fetchOptions = {
                         bodies: '',
@@ -226,8 +228,8 @@ async function processOldEmails(retryCount = 0) {
                     try {
                         // Skip if email is already in Records folder (check mailbox name)
                         if (mailboxName === 'Records' || mailboxName === '[Gmail]/Records' || mailboxName === '[Google Mail]/Records') {
-                            // Skip this email and process next
-                            processEmailSequentially();
+                            // Skip this email and process next with delay
+                            setTimeout(() => processEmailSequentially(), 100);
                             return;
                         }
 
@@ -269,13 +271,20 @@ async function processOldEmails(retryCount = 0) {
                                     
                                     if (isInRecords) {
                                         console.log(`*** Skipping email already in Records: ${email.subject || '(no subject)'}`);
-                                        // Process next email - ensure we continue the loop
-                                        setImmediate(() => processEmailSequentially());
+                                        // Process next email with delay to avoid throttling
+                                        setTimeout(() => processEmailSequentially(), 100);
                                         return;
                                     }
                                     
                                     const emailDate = email.date || new Date(attributes.date);
                                     const emailAge = Math.floor((new Date() - emailDate) / (1000 * 60 * 60 * 24)); // Age in days
+
+                                    // Check if email is in INBOX by checking labels or mailbox name
+                                    const isInInbox = mailboxName === 'INBOX' || 
+                                        (labelsArray.some(label => {
+                                            const labelStr = String(label).toLowerCase();
+                                            return labelStr === 'inbox' || labelStr === '\\inbox';
+                                        }));
 
                                     // Only process if not already starred (important emails)
                                     if (!attributes.flags.includes('\\Flagged')) {
@@ -300,8 +309,8 @@ async function processOldEmails(retryCount = 0) {
                                                 });
                                             });
                                             
-                                            // Process next email - ensure we continue the loop
-                                            setImmediate(() => processEmailSequentially());
+                                            // Process next email with delay to avoid throttling
+                                            setTimeout(() => processEmailSequentially(), 100);
                                             return;
                                         }
                                         
@@ -313,33 +322,49 @@ async function processOldEmails(retryCount = 0) {
                                         );
 
                                         if (emailAnalysis.judgment !== 'unknown') {
-                                            // If email is worth reading (judgment === true), move to Records category
+                                            // If email is worth reading (judgment === true)
                                             if (emailAnalysis.judgment === true) {
-                                                // Move to Records category (worth reading emails)
-                                                const recordsFolder = 'Records';
-                                                
-                                                // Move email to Records folder first, then star it in the new location
-                                                await new Promise((resolve) => {
-                                                    imap.move(attributes.uid, recordsFolder, function (err) {
-                                                        if (err) {
-                                                            console.log(`Error moving email to ${recordsFolder}:`, err);
-                                                            resolve();
-                                                        } else {
-                                                            console.log(`MOVED TO RECORDS: ${email.subject} (worth reading)`);
-                                                            
-                                                            // After moving, star the email in the Records folder
-                                                            // Note: We can't star in the original folder since it's read-only
-                                                            // The email will be starred in Records folder if needed
-                                                            // For now, we'll skip starring since it's already moved to Records
-                                                            if (config.settings.starAllKeptEmails) {
-                                                                // The email is now in Records, we could try to star it there
-                                                                // but that would require opening Records folder, which is complex
-                                                                // So we'll just move it and skip starring for old emails
+                                                // If email is in INBOX, less than 30 days old, and worth reading: star it and keep in inbox
+                                                if (isInInbox && emailAge < 30) {
+                                                    // Only try to star if mailbox is writable and we're in INBOX
+                                                    if (config.settings.starAllKeptEmails && canStarEmails) {
+                                                        imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
+                                                            if (err && err.textCode !== 'THROTTLED') {
+                                                                // Only log non-throttling errors (throttling is expected)
+                                                                if (!err.message || !err.message.includes('READ-ONLY')) {
+                                                                    console.log('Error starring email:', err.message || err);
+                                                                }
                                                             }
-                                                            resolve();
-                                                        }
+                                                        });
+                                                    }
+                                                    console.log(`Email kept in inbox (starred if enabled) (${emailAge} days old, worth reading).`);
+                                                } else {
+                                                    // Email is 30 days or older OR not in INBOX, move to Records category (worth reading emails)
+                                                    const recordsFolder = 'Records';
+                                                    
+                                                    // Move email to Records folder first, then star it in the new location
+                                                    await new Promise((resolve) => {
+                                                        imap.move(attributes.uid, recordsFolder, function (err) {
+                                                            if (err) {
+                                                                console.log(`Error moving email to ${recordsFolder}:`, err);
+                                                                resolve();
+                                                            } else {
+                                                                console.log(`MOVED TO RECORDS: ${email.subject} (worth reading${emailAge >= 30 ? `, ${emailAge} days old` : ''})`);
+                                                                
+                                                                // After moving, star the email in the Records folder
+                                                                // Note: We can't star in the original folder since it's read-only
+                                                                // The email will be starred in Records folder if needed
+                                                                // For now, we'll skip starring since it's already moved to Records
+                                                                if (config.settings.starAllKeptEmails) {
+                                                                    // The email is now in Records, we could try to star it there
+                                                                    // but that would require opening Records folder, which is complex
+                                                                    // So we'll just move it and skip starring for old emails
+                                                                }
+                                                                resolve();
+                                                            }
+                                                        });
                                                     });
-                                                });
+                                                }
                                             } else {
                                                 // Email is NOT worth reading (judgment === false)
                                                 const folderToMoveTo = (config.settings.sortIntoCategoryFolders) 
@@ -394,7 +419,14 @@ async function processOldEmails(retryCount = 0) {
                                                         await new Promise((resolve) => {
                                                             imap.move(attributes.uid, folderToMoveTo, function (err) {
                                                                 if (err) {
-                                                                    console.log(`Error moving email to ${folderToMoveTo}:`, err);
+                                                                    // Handle missing folder gracefully
+                                                                    if (err.textCode === 'TRYCREATE') {
+                                                                        console.log(`Warning: Folder "${folderToMoveTo}" does not exist. Please create it in Gmail as a label.`);
+                                                                    } else if (err.textCode === 'THROTTLED') {
+                                                                        console.log(`Gmail rate limit hit. Email "${email.subject}" will be processed later.`);
+                                                                    } else {
+                                                                        console.log(`Error moving email to ${folderToMoveTo}:`, err.message || err);
+                                                                    }
                                                                 } else {
                                                                     console.log(`Categorized: ${email.subject} → ${folderToMoveTo}`);
                                                                     categorizedCount++;
@@ -412,21 +444,22 @@ async function processOldEmails(retryCount = 0) {
                                     // Ensure we continue even on error
                                 }
                                 
-                                // Process next email - ensure we continue the loop
-                                setImmediate(() => processEmailSequentially());
+                                // Process next email with a small delay to avoid Gmail throttling
+                                // Delay of 100ms between emails to stay under rate limits
+                                setTimeout(() => processEmailSequentially(), 100);
                             });
                         });
 
                         f.once('error', function(err) {
                             console.error('Error fetching email:', err);
-                            // Continue with next email - ensure we continue the loop
-                            setImmediate(() => processEmailSequentially());
+                            // Continue with next email with delay to avoid throttling
+                            setTimeout(() => processEmailSequentially(), 100);
                         });
 
                     } catch (err) {
                         console.error('Error in processEmailSequentially:', err);
-                        // Continue with next email - ensure we continue the loop
-                        setImmediate(() => processEmailSequentially());
+                        // Continue with next email with delay to avoid throttling
+                        setTimeout(() => processEmailSequentially(), 100);
                     }
                 }
 
@@ -468,9 +501,6 @@ async function processOldEmails(retryCount = 0) {
                 processEmailSequentially();
                 }); // Close openBox callback
             }
-
-            // Start searching from the first folder
-            tryNextFolder();
         });
 
         imap.once('error', function(err) {

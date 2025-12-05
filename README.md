@@ -53,7 +53,7 @@ rules:
         ```yaml
         categoryFolderNames:
           - News
-          - Social Updates
+          - SocialUpdate
           - Work
           - Family
           - Financial

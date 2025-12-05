@@ -74,7 +74,7 @@ openAI:
 # Spaces in folder names are fine as long as they case sensitive match your gmail label.
 categoryFolderNames:
   - News
-  - Social Updates
+  - SocialUpdate
   - Blog
   - Financial
   - Marketing

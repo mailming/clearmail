@@ -128,21 +128,35 @@ async function processEmails(timestamp, retryCount = 0) {
                                                 if (emailAnalysis.judgment !== 'unknown') {
                                                     // After determining if an email is worth reading or not
                                                     if (emailAnalysis.judgment === true) {
-                                                        // Move to Records category (worth reading emails)
-                                                        const recordsFolder = 'Records';
-                                                        if (config.settings.starAllKeptEmails) {
-                                                            imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
-                                                                if (err) console.log('Error starring email:', err);
+                                                        // Calculate email age in days
+                                                        const emailDate = email.date || new Date(attributes.date);
+                                                        const emailAge = Math.floor((new Date() - emailDate) / (1000 * 60 * 60 * 24)); // Age in days
+                                                        
+                                                        // If email is less than 30 days old and worth reading, star it and keep in inbox
+                                                        if (emailAge < 30) {
+                                                            if (config.settings.starAllKeptEmails) {
+                                                                imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
+                                                                    if (err) console.log('Error starring email:', err);
+                                                                });
+                                                            }
+                                                            console.log(`Email kept in inbox (starred if enabled) (${emailAge} days old, worth reading).`);
+                                                        } else {
+                                                            // Email is 30 days or older, move to Records category (worth reading emails)
+                                                            const recordsFolder = 'Records';
+                                                            if (config.settings.starAllKeptEmails) {
+                                                                imap.addFlags(attributes.uid, ['\\Flagged'], function (err) {
+                                                                    if (err) console.log('Error starring email:', err);
+                                                                });
+                                                            }
+                                                            // Move email to Records folder
+                                                            imap.move(attributes.uid, recordsFolder, function (err) {
+                                                                if (err) {
+                                                                    console.log(`Error moving email to ${recordsFolder}:`, err);
+                                                                } else {
+                                                                    console.log(`Email moved to ${recordsFolder} (worth reading, ${emailAge} days old).`);
+                                                                }
                                                             });
                                                         }
-                                                        // Move email to Records folder
-                                                        imap.move(attributes.uid, recordsFolder, function (err) {
-                                                            if (err) {
-                                                                console.log(`Error moving email to ${recordsFolder}:`, err);
-                                                            } else {
-                                                                console.log(`Email moved to ${recordsFolder} (worth reading).`);
-                                                            }
-                                                        });
                                                     } else if (emailAnalysis.judgment === false) {
                                                         // Mark the message as seen and remove the primary inbox label
                                                         if (config.settings.markAllRejectedEmailsRead) imap.setFlags(attributes.uid, ['\\Seen'], function (err) {
